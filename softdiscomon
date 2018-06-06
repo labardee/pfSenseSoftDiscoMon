@@ -1,0 +1,179 @@
+/*
+ * softdiscomon
+ * 
+ * Soft Disconnect Monitor
+ * Written by Ansen Labardee and Kris Linnel
+ *
+ * This script uses curl to monitor gateways based on the html they recive back from specified sites
+ * If a specified string is found the html response a specified number of times, we mark the gateway up
+ * If the string is not found in the page source we mark the gateway as down. 
+ *
+ * This script is intened to be run by crontab and should be stored at /etc/phpshellsessions/softdiscomon
+ * This script can be invoked by the root user with the command "pfSsh.php playback softdiscomon
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ * http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+require_once("config.inc");
+require_once("functions.inc");
+
+global $g, $config, $test, $threshold, $report;
+
+
+// Set the URLs, match string and match threshold here.
+// Threshold is the number of times a match must be found in the html from the configured URL
+
+$report = null;
+$threshold = 7;
+$test = array();
+
+$test[1]['url'] = "https://www.google.com";
+$test[2]['url'] = "https://www.freebsd.org";
+$test[3]['url'] = "https://www.linux.org/";
+
+$test[1]['match'] = 'google.com';
+$test[2]['match'] = 'freebsd.org';
+$test[3]['match'] = 'linux.org';
+
+
+// Get the friendly interface name of both gateways, if a gateway doesn't exist a NULL value will be returned
+
+$gw0_friendly = $config['gateways']['gateway_item']['0']['interface'];
+//echo("GW0 Friendly Interface Name: $gw0_friendly \n");
+$gw1_friendly = $config['gateways']['gateway_item']['1']['interface'];
+//echo("GW1 Friendly Interface Name: $gw1_friendly \n");
+
+// If the friendly interface name exists then use it to get the real interface name
+// Also get the current status of the gateway 
+
+if ($gw0_friendly) {
+  $gw0_interface = $config['interfaces'][$gw0_friendly]['if'];
+  $gw0_name = $config['gateways']['gateway_item']['0']['name'];
+												  
+//    echo("GW0 Name: $gw0_name \n");
+	  $gw0_status = get_dpinger_status($gw0_name)['status'];
+										
+}
+
+if ($gw1_friendly) {
+  $gw1_interface = $config['interfaces'][$gw1_friendly]['if'];
+  $gw1_name = $config['gateways']['gateway_item']['1']['name'];
+
+//    echo("GW1 Name: $gw1_name \n");
+	  $gw1_status = get_dpinger_status($gw1_name)['status'];
+										
+}
+
+// If the Gateway has a real interface and the status is not down, then begin testing
+// using the test array and thresholds configured above.
+// We will test Gateway 0 with URLS 1&2 and Gateway 1 with URLS 2&3, if either urls return sucessfull then Mark
+// the gateway up, if both urls fail then mark it as down.
+
+
+//echo("GW0 Status: $gw0_status \n");
+//echo("GW0 Real Interface: $gw0_interface \n");
+
+
+if (($gw0_interface) && ($gw0_status !== 'down')) {
+//	echo("Starting tests on first gateway \n");
+		$pass_gw0 = 0;
+
+		$pass_gw0 = $pass_gw0 + test_url(1, $gw0_interface);
+		$pass_gw0 = $pass_gw0 + test_url(2, $gw0_interface);
+
+		if ($pass_gw0 > 0) {
+//				echo("Gateway Test Pass! \nSites searched that had valid matches: $pass_gw0 \n");
+				mark_gw_online(0);
+		}
+		else {
+				
+//				echo("Gateway Test FAIL! \nSites searched that had valid matches: $pass_gw0 \n");
+				mark_gw_offline(0);
+		}
+}
+
+//echo("GW1 Status: $gw1_status \n");
+//echo("GW1 Real Interface: $gw1_interface \n");
+
+if (($gw1_interface) && ($gw1_status !== 'down')) {
+//	echo("Starting tests on second gateway \n");
+		$pass_gw1 = 0;
+
+		$pass_gw1 = $pass_gw1 + test_url(2, $gw1_interface);
+		$pass_gw1 = $pass_gw1 + test_url(3, $gw1_interface);
+
+		if ($pass_gw1 > 0) {				
+//				echo("Gateway Test Pass! \nSites searched that had valid matches: $pass_gw1 \n");
+				mark_gw_online(1);
+		}
+		else {
+//				echo("Gateway Test FAIL! \nSites searched that had valid matches: $pass_gw1 \n");
+				mark_gw_offline(1);
+		}
+}
+
+exit(0);
+
+
+function mark_gw_online($gw_number) {
+		global $g, $config, $test, $threshold, $report;
+		if (!isset($config['gateways']['gateway_item'][$gw_number]['force_down'])) {
+			return 0;
+			 
+		}
+		else {
+			unset($config['gateways']['gateway_item'][$gw_number]['force_down']);
+			write_config();
+			$name = $config['gateways']['gateway_item'][$gw_number]['name'];
+				notify_via_smtp(sprintf(gettext("Gateway %s has been enabled!\nGateway soft disconnect tests have passed; Gateway is now usable.\n%s"), $name, $report), true);																											   
+//				echo("Gateway Has Been Enabled! \n");
+		}
+
+}
+
+function mark_gw_offline($gw_number) {
+		global $g, $config, $test, $threshold, $report;
+		if (isset($config['gateways']['gateway_item'][$gw_number]['force_down'])) {
+				return 0;
+		}
+		else {
+			$config['gateways']['gateway_item'][$gw_number]['force_down'] = "";
+			write_config();
+			$name = $config['gateways']['gateway_item'][$gw_number]['name'];
+				notify_via_smtp(sprintf(gettext("Gateway %s has been DISABLED!!!!\nGateway soft disconnect tests have failed; Gateway is unusable.\n%s"), $name, $report), true);;																	   
+//				echo("Gateway Has Been Disabled! \n");
+		}
+
+}
+
+function test_url($test_number, $interface) {
+		global $g, $config, $test, $threshold, $report;
+		$url = $test[$test_number]['url'];
+		$curl = curl_init($url);
+		curl_setopt($curl, CURLOPT_INTERFACE, $interface);
+		curl_setopt($curl, CURLOPT_RETURNTRANSFER, true);
+		curl_setopt($curl, CURLOPT_CONNECTTIMEOUT ,5);
+		curl_setopt($curl, CURLOPT_TIMEOUT, 10);
+		$page_source = curl_exec($curl);
+		curl_close($curl);
+		
+		$match = $test[$test_number]['match'];
+		$count = substr_count(strtolower($page_source), strtolower($match));
+		$report = "Test was looking for $threshold or more matches of $match from $url while using interface $interface.\nSubstring count returned $count matches.\n";		
+
+		if ($count >= $threshold) {
+				return 1;
+		}
+
+		return 0;
+}
